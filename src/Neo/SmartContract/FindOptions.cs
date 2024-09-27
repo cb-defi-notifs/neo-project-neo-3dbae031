@@ -1,10 +1,11 @@
-// Copyright (C) 2015-2022 The Neo Project.
-// 
-// The neo is free software distributed under the MIT software license, 
-// see the accompanying file LICENSE in the main directory of the
-// project or http://www.opensource.org/licenses/mit-license.php 
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// FindOptions.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
 // for more details.
-// 
+//
 // Redistribution and use in source and binary forms with or without
 // modifications are permitted.
 
@@ -54,8 +55,13 @@ namespace Neo.SmartContract
         PickField1 = 1 << 5,
 
         /// <summary>
+        /// Indicates that results should be returned in backwards (descending) order.
+        /// </summary>
+        Backwards = 1 << 7,
+
+        /// <summary>
         /// This value is only for internal use, and shouldn't be used in smart contracts.
         /// </summary>
-        All = KeysOnly | RemovePrefix | ValuesOnly | DeserializeValues | PickField0 | PickField1
+        All = KeysOnly | RemovePrefix | ValuesOnly | DeserializeValues | PickField0 | PickField1 | Backwards
     }
 }

@@ -1,6 +1,18 @@
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_Cryptography_Helper.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
+
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Neo.Cryptography;
+using Neo.Extensions;
 using Neo.IO;
 using Neo.Network.P2P.Payloads;
 using Neo.SmartContract;
@@ -30,6 +42,17 @@ namespace Neo.UnitTests.Cryptography
             input = "3vQB7B6MrGQZaxCuFg4og";
             action = () => input.Base58CheckDecode();
             action.Should().Throw<FormatException>();
+
+            Assert.ThrowsException<FormatException>(() => string.Empty.Base58CheckDecode());
+        }
+
+        [TestMethod]
+        public void TestMurmurReadOnlySpan()
+        {
+            ReadOnlySpan<byte> input = "Hello, world!"u8;
+            byte[] input2 = input.ToArray();
+            input.Murmur32(0).Should().Be(input2.Murmur32(0));
+            input.Murmur128(0).Should().Equal(input2.Murmur128(0));
         }
 
         [TestMethod]
@@ -39,6 +62,19 @@ namespace Neo.UnitTests.Cryptography
             byte[] result = value.Sha256(0, value.Length);
             string resultStr = result.ToHexString();
             resultStr.Should().Be("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+            value.Sha256().Should().Equal(result);
+            ((Span<byte>)value).Sha256().Should().Equal(result);
+            ((ReadOnlySpan<byte>)value).Sha256().Should().Equal(result);
+        }
+
+        [TestMethod]
+        public void TestKeccak256()
+        {
+            var input = "Hello, world!"u8.ToArray();
+            var result = input.Keccak256();
+            result.ToHexString().Should().Be("b6e16d27ac5ab427a7f68900ac5559ce272dc6c37c82b3e052246c82244c50e4");
+            ((Span<byte>)input).Keccak256().Should().Equal(result);
+            ((ReadOnlySpan<byte>)input).Keccak256().Should().Equal(result);
         }
 
         [TestMethod]
@@ -53,7 +89,7 @@ namespace Neo.UnitTests.Cryptography
         [TestMethod]
         public void TestAESEncryptAndDecrypt()
         {
-            NEP6Wallet wallet = new NEP6Wallet("", "1", ProtocolSettings.Default);
+            NEP6Wallet wallet = new NEP6Wallet("", "1", TestProtocolSettings.Default);
             wallet.CreateAccount();
             WalletAccount account = wallet.GetAccounts().ToArray()[0];
             KeyPair key = account.GetKey();

@@ -1,10 +1,11 @@
-// Copyright (C) 2015-2022 The Neo Project.
-// 
-// The neo is free software distributed under the MIT software license, 
-// see the accompanying file LICENSE in the main directory of the
-// project or http://www.opensource.org/licenses/mit-license.php 
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// Transaction.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
 // for more details.
-// 
+//
 // Redistribution and use in source and binary forms with or without
 // modifications are permitted.
 
@@ -45,7 +46,9 @@ namespace Neo.Network.P2P.Payloads
 
         private byte version;
         private uint nonce;
+        // In the unit of datoshi, 1 datoshi = 1e-8 GAS
         private long sysfee;
+        // In the unit of datoshi, 1 datoshi = 1e-8 GAS
         private long netfee;
         private uint validUntilBlock;
         private Signer[] _signers;
@@ -338,12 +341,13 @@ namespace Neo.Network.P2P.Payloads
         /// <param name="settings">The <see cref="ProtocolSettings"/> used to verify the transaction.</param>
         /// <param name="snapshot">The snapshot used to verify the transaction.</param>
         /// <param name="context">The <see cref="TransactionVerificationContext"/> used to verify the transaction.</param>
+        /// <param name="conflictsList">The list of conflicting <see cref="Transaction"/> those fee should be excluded from sender's overall fee during <see cref="TransactionVerificationContext"/>-based verification in case of sender's match.</param>
         /// <returns>The result of the verification.</returns>
-        public VerifyResult Verify(ProtocolSettings settings, DataCache snapshot, TransactionVerificationContext context)
+        public VerifyResult Verify(ProtocolSettings settings, DataCache snapshot, TransactionVerificationContext context, IEnumerable<Transaction> conflictsList)
         {
             VerifyResult result = VerifyStateIndependent(settings);
             if (result != VerifyResult.Succeed) return result;
-            return VerifyStateDependent(settings, snapshot, context);
+            return VerifyStateDependent(settings, snapshot, context, conflictsList);
         }
 
         /// <summary>
@@ -352,8 +356,9 @@ namespace Neo.Network.P2P.Payloads
         /// <param name="settings">The <see cref="ProtocolSettings"/> used to verify the transaction.</param>
         /// <param name="snapshot">The snapshot used to verify the transaction.</param>
         /// <param name="context">The <see cref="TransactionVerificationContext"/> used to verify the transaction.</param>
+        /// <param name="conflictsList">The list of conflicting <see cref="Transaction"/> those fee should be excluded from sender's overall fee during <see cref="TransactionVerificationContext"/>-based verification in case of sender's match.</param>
         /// <returns>The result of the verification.</returns>
-        public virtual VerifyResult VerifyStateDependent(ProtocolSettings settings, DataCache snapshot, TransactionVerificationContext context)
+        public virtual VerifyResult VerifyStateDependent(ProtocolSettings settings, DataCache snapshot, TransactionVerificationContext context, IEnumerable<Transaction> conflictsList)
         {
             uint height = NativeContract.Ledger.CurrentIndex(snapshot);
             if (ValidUntilBlock <= height || ValidUntilBlock > height + settings.MaxValidUntilBlockIncrement)
@@ -362,30 +367,33 @@ namespace Neo.Network.P2P.Payloads
             foreach (UInt160 hash in hashes)
                 if (NativeContract.Policy.IsBlocked(snapshot, hash))
                     return VerifyResult.PolicyFail;
-            if (!(context?.CheckTransaction(this, snapshot) ?? true)) return VerifyResult.InsufficientFunds;
+            if (!(context?.CheckTransaction(this, conflictsList, snapshot) ?? true)) return VerifyResult.InsufficientFunds;
+            long attributesFee = 0;
             foreach (TransactionAttribute attribute in Attributes)
                 if (!attribute.Verify(snapshot, this))
                     return VerifyResult.InvalidAttribute;
-            long net_fee = NetworkFee - Size * NativeContract.Policy.GetFeePerByte(snapshot);
-            if (net_fee < 0) return VerifyResult.InsufficientFunds;
+                else
+                    attributesFee += attribute.CalculateNetworkFee(snapshot, this);
+            long netFeeDatoshi = NetworkFee - (Size * NativeContract.Policy.GetFeePerByte(snapshot)) - attributesFee;
+            if (netFeeDatoshi < 0) return VerifyResult.InsufficientFunds;
 
-            if (net_fee > MaxVerificationGas) net_fee = MaxVerificationGas;
+            if (netFeeDatoshi > MaxVerificationGas) netFeeDatoshi = MaxVerificationGas;
             uint execFeeFactor = NativeContract.Policy.GetExecFeeFactor(snapshot);
             for (int i = 0; i < hashes.Length; i++)
             {
                 if (IsSignatureContract(witnesses[i].VerificationScript.Span))
-                    net_fee -= execFeeFactor * SignatureContractCost();
+                    netFeeDatoshi -= execFeeFactor * SignatureContractCost();
                 else if (IsMultiSigContract(witnesses[i].VerificationScript.Span, out int m, out int n))
                 {
-                    net_fee -= execFeeFactor * MultiSignatureContractCost(m, n);
+                    netFeeDatoshi -= execFeeFactor * MultiSignatureContractCost(m, n);
                 }
                 else
                 {
-                    if (!this.VerifyWitness(settings, snapshot, hashes[i], witnesses[i], net_fee, out long fee))
+                    if (!this.VerifyWitness(settings, snapshot, hashes[i], witnesses[i], netFeeDatoshi, out long fee))
                         return VerifyResult.Invalid;
-                    net_fee -= fee;
+                    netFeeDatoshi -= fee;
                 }
-                if (net_fee < 0) return VerifyResult.InsufficientFunds;
+                if (netFeeDatoshi < 0) return VerifyResult.InsufficientFunds;
             }
             return VerifyResult.Succeed;
         }
@@ -452,6 +460,7 @@ namespace Neo.Network.P2P.Payloads
 
         public StackItem ToStackItem(ReferenceCounter referenceCounter)
         {
+            if (_signers == null || _signers.Length == 0) throw new ArgumentException("Sender is not specified in the transaction.");
             return new Array(referenceCounter, new StackItem[]
             {
                 // Computed properties

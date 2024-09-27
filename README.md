@@ -11,18 +11,14 @@
 <p align="center">
    A modern distributed network for the Smart Economy.
   <br>
-  <a href="https://docs.neo.org/docs/en-us/index.html"><strong>Documentation »</strong></a>
+  <a href="https://developers.neo.org/docs/"><strong>Documentation »</strong></a>
   <br>
   <br>
   <a href="https://github.com/neo-project/neo"><strong>Neo</strong></a>
   ·
-  <a href="https://github.com/neo-project/neo-vm">Neo VM</a>
-  ·
   <a href="https://github.com/neo-project/neo-modules">Neo Modules</a>
   ·
   <a href="https://github.com/neo-project/neo-devpack-dotnet">Neo DevPack</a>
-  ·
-  <a href="https://github.com/neo-project/neo-node">Neo Node</a>
 </p>
 <p align="center">
   <a href="https://twitter.com/neo_blockchain">
@@ -81,9 +77,6 @@
   </a>
 </p>
 <p align="center">
-  <a href="https://travis-ci.org/neo-project/neo">
-    <img src="https://travis-ci.org/neo-project/neo.svg?branch=master" alt="Current TravisCI build status.">
-  </a>
   <a href="https://github.com/neo-project/neo/releases">
     <img src="https://badge.fury.io/gh/neo-project%2Fneo.svg" alt="Current neo version.">
   </a>
@@ -95,7 +88,11 @@
   </a>
 </p>
 
-
+<p align="center">
+  <a href="https://codespaces.new/neo-project/neo">
+    <img src="https://github.com/codespaces/badge.svg" alt="Open in GitHub Codespaces.">
+  </a>
+</p>
 
 
 ## Table of Contents
@@ -108,8 +105,8 @@
 
 ## Overview
 This repository contain main classes of the 
-[Neo](https://www.neo.org) blockchain.   
-Visit the [documentation](https://docs.neo.org/docs/en-us/index.html) to get started.
+[Neo](https://neo.org) blockchain.   
+Visit the [tutorials](https://developers.neo.org) to get started.
 
 
 ## Project structure
@@ -133,8 +130,6 @@ An overview of the project folders can be seen below.
 Code references are provided for all platform building blocks. That includes the base library, the VM, a command line application and the compiler. 
 
 * [neo:](https://github.com/neo-project/neo/) Neo core library, contains base classes, including ledger, p2p and IO modules.
-* [neo-vm:](https://github.com/neo-project/neo-vm/) Neo Virtual Machine is a decoupled VM that Neo uses to execute its scripts. It also uses the `InteropService` layer to extend its functionalities.
-* [neo-node:](https://github.com/neo-project/neo-node/) Executable version of the Neo library, exposing features using a command line application or GUI.
 * [neo-modules:](https://github.com/neo-project/neo-modules/) Neo modules include additional tools and plugins to be used with Neo.
 * [neo-devpack-dotnet:](https://github.com/neo-project/neo-devpack-dotnet/) These are the official tools used to convert a C# smart-contract into a *neo executable file*.
 

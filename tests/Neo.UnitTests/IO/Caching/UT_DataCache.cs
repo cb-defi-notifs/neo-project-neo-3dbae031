@@ -1,3 +1,14 @@
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_DataCache.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
+
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Neo.IO;
@@ -13,7 +24,7 @@ namespace Neo.UnitTests.IO.Caching
     [TestClass]
     public class UT_DataCache
     {
-        private MemoryStore store = new();
+        private readonly MemoryStore store = new();
         private SnapshotCache myDataCache;
 
         private static readonly StorageKey key1 = new() { Id = 0, Key = Encoding.UTF8.GetBytes("key1") };
@@ -111,18 +122,24 @@ namespace Neo.UnitTests.IO.Caching
             myDataCache.Add(key3, value4);
             Assert.AreEqual(TrackState.Changed, myDataCache.GetChangeSet().Where(u => u.Key.Equals(key3)).Select(u => u.State).FirstOrDefault());
 
+            // If we use myDataCache after it is committed, it will return wrong result.
             myDataCache.Commit();
             Assert.AreEqual(0, myDataCache.GetChangeSet().Count());
 
             store.TryGet(key1.ToArray()).SequenceEqual(value1.ToArray()).Should().BeTrue();
             store.TryGet(key2.ToArray()).Should().BeNull();
             store.TryGet(key3.ToArray()).SequenceEqual(value4.ToArray()).Should().BeTrue();
+
+            myDataCache.TryGet(key1).Value.ToArray().SequenceEqual(value1.ToArray()).Should().BeTrue();
+            // Though value is deleted from the store, the value can still be gotten from the snapshot cache.
+            myDataCache.TryGet(key2).Value.ToArray().SequenceEqual(value2.ToArray()).Should().BeTrue();
+            myDataCache.TryGet(key3).Value.ToArray().SequenceEqual(value4.ToArray()).Should().BeTrue();
         }
 
         [TestMethod]
         public void TestCreateSnapshot()
         {
-            myDataCache.CreateSnapshot().Should().NotBeNull();
+            myDataCache.CloneCache().Should().NotBeNull();
         }
 
         [TestMethod]
@@ -152,10 +169,51 @@ namespace Neo.UnitTests.IO.Caching
             store.Put(key3.ToArray(), value3.ToArray());
             store.Put(key4.ToArray(), value4.ToArray());
 
-            var items = myDataCache.Find(key1.ToArray());
+            var k1 = key1.ToArray();
+            var items = myDataCache.Find(k1);
             key1.Should().Be(items.ElementAt(0).Key);
             value1.Should().Be(items.ElementAt(0).Value);
             items.Count().Should().Be(1);
+
+            // null and empty with the forward direction -> finds everything.
+            items = myDataCache.Find(null);
+            items.Count().Should().Be(4);
+            items = myDataCache.Find(new byte[] { });
+            items.Count().Should().Be(4);
+
+            // null and empty with the backwards direction -> miserably fails.
+            Action action = () => myDataCache.Find(null, SeekDirection.Backward);
+            action.Should().Throw<ArgumentException>();
+            action = () => myDataCache.Find(new byte[] { }, SeekDirection.Backward);
+            action.Should().Throw<ArgumentException>();
+
+            items = myDataCache.Find(k1, SeekDirection.Backward);
+            key1.Should().Be(items.ElementAt(0).Key);
+            value1.Should().Be(items.ElementAt(0).Value);
+            items.Count().Should().Be(1);
+
+            var prefix = k1.Take(k1.Count() - 1).ToArray(); // Just the "key" part to match everything.
+            items = myDataCache.Find(prefix);
+            items.Count().Should().Be(4);
+            key1.Should().Be(items.ElementAt(0).Key);
+            value1.Should().Be(items.ElementAt(0).Value);
+            key2.Should().Be(items.ElementAt(1).Key);
+            value2.Should().Be(items.ElementAt(1).Value);
+            key3.Should().Be(items.ElementAt(2).Key);
+            value3.EqualsTo(items.ElementAt(2).Value).Should().BeTrue();
+            key4.Should().Be(items.ElementAt(3).Key);
+            value4.EqualsTo(items.ElementAt(3).Value).Should().BeTrue();
+
+            items = myDataCache.Find(prefix, SeekDirection.Backward);
+            items.Count().Should().Be(4);
+            key4.Should().Be(items.ElementAt(0).Key);
+            value4.EqualsTo(items.ElementAt(0).Value).Should().BeTrue();
+            key3.Should().Be(items.ElementAt(1).Key);
+            value3.EqualsTo(items.ElementAt(1).Value).Should().BeTrue();
+            key2.Should().Be(items.ElementAt(2).Key);
+            value2.Should().Be(items.ElementAt(2).Value);
+            key1.Should().Be(items.ElementAt(3).Key);
+            value1.Should().Be(items.ElementAt(3).Value);
 
             items = myDataCache.Find(key5.ToArray());
             items.Count().Should().Be(0);

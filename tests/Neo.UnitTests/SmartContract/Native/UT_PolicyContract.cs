@@ -1,3 +1,14 @@
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_PolicyContract.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
+
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Neo.IO;
@@ -8,37 +19,103 @@ using Neo.SmartContract.Native;
 using Neo.UnitTests.Extensions;
 using System;
 using System.Linq;
+using System.Numerics;
 
 namespace Neo.UnitTests.SmartContract.Native
 {
     [TestClass]
     public class UT_PolicyContract
     {
-        private DataCache _snapshot;
+        private DataCache _snapshotCache;
 
         [TestInitialize]
         public void TestSetup()
         {
-            _snapshot = TestBlockchain.GetTestSnapshot();
+            _snapshotCache = TestBlockchain.GetTestSnapshotCache();
 
-            ApplicationEngine engine = ApplicationEngine.Create(TriggerType.OnPersist, null, _snapshot, new Block { Header = new Header() }, settings: TestBlockchain.TheNeoSystem.Settings, gas: 0);
-            NativeContract.ContractManagement.OnPersist(engine);
+            ApplicationEngine engine = ApplicationEngine.Create(TriggerType.OnPersist, null, _snapshotCache, new Block { Header = new Header() }, settings: TestBlockchain.TheNeoSystem.Settings, gas: 0);
+            NativeContract.ContractManagement.OnPersistAsync(engine);
         }
 
         [TestMethod]
         public void Check_Default()
         {
-            var snapshot = _snapshot.CreateSnapshot();
+            var snapshot = _snapshotCache.CloneCache();
 
             var ret = NativeContract.Policy.Call(snapshot, "getFeePerByte");
             ret.Should().BeOfType<VM.Types.Integer>();
             ret.GetInteger().Should().Be(1000);
+
+            ret = NativeContract.Policy.Call(snapshot, "getAttributeFee", new ContractParameter(ContractParameterType.Integer) { Value = (BigInteger)(byte)TransactionAttributeType.Conflicts });
+            ret.Should().BeOfType<VM.Types.Integer>();
+            ret.GetInteger().Should().Be(PolicyContract.DefaultAttributeFee);
+
+            Assert.ThrowsException<InvalidOperationException>(() => NativeContract.Policy.Call(snapshot, "getAttributeFee", new ContractParameter(ContractParameterType.Integer) { Value = (BigInteger)byte.MaxValue }));
+        }
+
+        [TestMethod]
+        public void Check_SetAttributeFee()
+        {
+            var snapshot = _snapshotCache.CloneCache();
+
+            // Fake blockchain
+            Block block = new()
+            {
+                Header = new Header
+                {
+                    Index = 1000,
+                    PrevHash = UInt256.Zero
+                }
+            };
+
+            var attr = new ContractParameter(ContractParameterType.Integer) { Value = (BigInteger)(byte)TransactionAttributeType.Conflicts };
+
+            // Without signature
+            Assert.ThrowsException<InvalidOperationException>(() =>
+            {
+                NativeContract.Policy.Call(snapshot, new Nep17NativeContractExtensions.ManualWitness(), block,
+                "setAttributeFee", attr, new ContractParameter(ContractParameterType.Integer) { Value = 100500 });
+            });
+
+            var ret = NativeContract.Policy.Call(snapshot, "getAttributeFee", attr);
+            ret.Should().BeOfType<VM.Types.Integer>();
+            ret.GetInteger().Should().Be(0);
+
+            // With signature, wrong value
+            UInt160 committeeMultiSigAddr = NativeContract.NEO.GetCommitteeAddress(snapshot);
+            Assert.ThrowsException<ArgumentOutOfRangeException>(() =>
+            {
+                NativeContract.Policy.Call(snapshot, new Nep17NativeContractExtensions.ManualWitness(committeeMultiSigAddr), block,
+                    "setAttributeFee", attr, new ContractParameter(ContractParameterType.Integer) { Value = 11_0000_0000 });
+            });
+
+            ret = NativeContract.Policy.Call(snapshot, "getAttributeFee", attr);
+            ret.Should().BeOfType<VM.Types.Integer>();
+            ret.GetInteger().Should().Be(0);
+
+            // Proper set
+            ret = NativeContract.Policy.Call(snapshot, new Nep17NativeContractExtensions.ManualWitness(committeeMultiSigAddr), block,
+                "setAttributeFee", attr, new ContractParameter(ContractParameterType.Integer) { Value = 300300 });
+            ret.IsNull.Should().BeTrue();
+
+            ret = NativeContract.Policy.Call(snapshot, "getAttributeFee", attr);
+            ret.Should().BeOfType<VM.Types.Integer>();
+            ret.GetInteger().Should().Be(300300);
+
+            // Set to zero
+            ret = NativeContract.Policy.Call(snapshot, new Nep17NativeContractExtensions.ManualWitness(committeeMultiSigAddr), block,
+                "setAttributeFee", attr, new ContractParameter(ContractParameterType.Integer) { Value = 0 });
+            ret.IsNull.Should().BeTrue();
+
+            ret = NativeContract.Policy.Call(snapshot, "getAttributeFee", attr);
+            ret.Should().BeOfType<VM.Types.Integer>();
+            ret.GetInteger().Should().Be(0);
         }
 
         [TestMethod]
         public void Check_SetFeePerByte()
         {
-            var snapshot = _snapshot.CreateSnapshot();
+            var snapshot = _snapshotCache.CloneCache();
 
             // Fake blockchain
 
@@ -77,7 +154,7 @@ namespace Neo.UnitTests.SmartContract.Native
         [TestMethod]
         public void Check_SetBaseExecFee()
         {
-            var snapshot = _snapshot.CreateSnapshot();
+            var snapshot = _snapshotCache.CloneCache();
 
             // Fake blockchain
 
@@ -127,7 +204,7 @@ namespace Neo.UnitTests.SmartContract.Native
         [TestMethod]
         public void Check_SetStoragePrice()
         {
-            var snapshot = _snapshot.CreateSnapshot();
+            var snapshot = _snapshotCache.CloneCache();
 
             // Fake blockchain
 
@@ -177,7 +254,7 @@ namespace Neo.UnitTests.SmartContract.Native
         [TestMethod]
         public void Check_BlockAccount()
         {
-            var snapshot = _snapshot.CreateSnapshot();
+            var snapshot = _snapshotCache.CloneCache();
 
             // Fake blockchain
 
@@ -233,7 +310,7 @@ namespace Neo.UnitTests.SmartContract.Native
         [TestMethod]
         public void Check_Block_UnblockAccount()
         {
-            var snapshot = _snapshot.CreateSnapshot();
+            var snapshot = _snapshotCache.CloneCache();
 
             // Fake blockchain
 

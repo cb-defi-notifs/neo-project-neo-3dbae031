@@ -1,8 +1,18 @@
-#pragma warning disable CS1718
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_UInt160.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
 
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
+using System.Security.Cryptography;
 
 namespace Neo.UnitTests.IO
 {
@@ -25,8 +35,16 @@ namespace Neo.UnitTests.IO
         [TestMethod]
         public void TestGernerator2()
         {
-            UInt160 uInt160 = new UInt160(new byte[20]);
+            UInt160 uInt160 = new byte[20];
             Assert.IsNotNull(uInt160);
+        }
+
+        [TestMethod]
+        public void TestGernerator3()
+        {
+            UInt160 uInt160 = "0xff00000000000000000000000000000000000001";
+            Assert.IsNotNull(uInt160);
+            Assert.IsTrue(uInt160.ToString() == "0xff00000000000000000000000000000000000001");
         }
 
         [TestMethod]
@@ -46,9 +64,13 @@ namespace Neo.UnitTests.IO
             byte[] temp = new byte[20];
             temp[19] = 0x01;
             UInt160 result = new UInt160(temp);
-            Assert.AreEqual(true, UInt160.Zero.Equals(UInt160.Zero));
-            Assert.AreEqual(false, UInt160.Zero.Equals(result));
-            Assert.AreEqual(false, result.Equals(null));
+            Assert.IsTrue(UInt160.Zero.Equals(UInt160.Zero));
+            Assert.IsFalse(UInt160.Zero.Equals(result));
+            Assert.IsFalse(result.Equals(null));
+            Assert.IsTrue(UInt160.Zero == UInt160.Zero);
+            Assert.IsFalse(UInt160.Zero != UInt160.Zero);
+            Assert.IsTrue(UInt160.Zero == "0x0000000000000000000000000000000000000000");
+            Assert.IsFalse(UInt160.Zero == "0x0000000000000000000000000000000000000001");
         }
 
         [TestMethod]
@@ -81,24 +103,28 @@ namespace Neo.UnitTests.IO
         public void TestOperatorLarger()
         {
             Assert.AreEqual(false, UInt160.Zero > UInt160.Zero);
+            Assert.IsFalse(UInt160.Zero > "0x0000000000000000000000000000000000000000");
         }
 
         [TestMethod]
         public void TestOperatorLargerAndEqual()
         {
             Assert.AreEqual(true, UInt160.Zero >= UInt160.Zero);
+            Assert.IsTrue(UInt160.Zero >= "0x0000000000000000000000000000000000000000");
         }
 
         [TestMethod]
         public void TestOperatorSmaller()
         {
             Assert.AreEqual(false, UInt160.Zero < UInt160.Zero);
+            Assert.IsFalse(UInt160.Zero < "0x0000000000000000000000000000000000000000");
         }
 
         [TestMethod]
         public void TestOperatorSmallerAndEqual()
         {
             Assert.AreEqual(true, UInt160.Zero <= UInt160.Zero);
+            Assert.IsTrue(UInt160.Zero >= "0x0000000000000000000000000000000000000000");
         }
     }
 }

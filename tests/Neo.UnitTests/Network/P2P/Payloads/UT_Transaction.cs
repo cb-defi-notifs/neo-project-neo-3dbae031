@@ -1,6 +1,18 @@
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_Transaction.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
+
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Neo.Cryptography.ECC;
+using Neo.Extensions;
 using Neo.IO;
 using Neo.Json;
 using Neo.Ledger;
@@ -10,6 +22,7 @@ using Neo.SmartContract.Native;
 using Neo.VM;
 using Neo.Wallets;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 
@@ -24,6 +37,12 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void TestSetup()
         {
             uut = new Transaction();
+        }
+
+        [TestCleanup]
+        public void Clean()
+        {
+            TestBlockchain.ResetStore();
         }
 
         [TestMethod]
@@ -82,16 +101,16 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void Size_Get()
         {
             uut.Script = TestUtils.GetByteArray(32, 0x42);
-            uut.Signers = Array.Empty<Signer>();
-            uut.Attributes = Array.Empty<TransactionAttribute>();
-            uut.Witnesses = new[]
-            {
+            uut.Signers = [];
+            uut.Attributes = [];
+            uut.Witnesses =
+            [
                 new Witness
                 {
                     InvocationScript = Array.Empty<byte>(),
                     VerificationScript = Array.Empty<byte>()
                 }
-            };
+            ];
 
             uut.Version.Should().Be(0);
             uut.Script.Length.Should().Be(32);
@@ -104,17 +123,16 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         {
             var walletA = TestUtils.GenerateTestWallet("123");
             var walletB = TestUtils.GenerateTestWallet("123");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
 
             var a = walletA.CreateAccount();
             var b = walletB.CreateAccount();
 
             var multiSignContract = Contract.CreateMultiSigContract(2,
-                new ECPoint[]
-                {
-                        a.GetKey().PublicKey,
-                        b.GetKey().PublicKey
-                });
+            [
+                a.GetKey().PublicKey,
+                b.GetKey().PublicKey
+            ]);
 
             walletA.CreateAccount(multiSignContract, a.GetKey());
             var acc = walletB.CreateAccount(multiSignContract, b.GetKey());
@@ -122,32 +140,31 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
 
-            var tx = walletA.MakeTransaction(snapshot, new TransferOutput[]
-            {
-                    new TransferOutput()
-                    {
-                         AssetId = NativeContract.GAS.Hash,
-                         ScriptHash = acc.ScriptHash,
-                         Value = new BigDecimal(BigInteger.One,8)
-                    }
-            }, acc.ScriptHash);
+            var tx = walletA.MakeTransaction(snapshotCache, [
+                new TransferOutput
+                {
+                    AssetId = NativeContract.GAS.Hash,
+                    ScriptHash = acc.ScriptHash,
+                    Value = new BigDecimal(BigInteger.One, 8)
+                }
+            ], acc.ScriptHash);
 
             Assert.IsNotNull(tx);
 
             // Sign
 
-            var wrongData = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network + 1);
+            var wrongData = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network + 1);
             Assert.IsFalse(walletA.Sign(wrongData));
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             Assert.IsTrue(walletA.Sign(data));
             Assert.IsTrue(walletB.Sign(data));
             Assert.IsTrue(data.Completed);
@@ -156,23 +173,23 @@ namespace Neo.UnitTests.Network.P2P.Payloads
 
             // Fast check
 
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
 
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
 
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
             Assert.AreEqual(1967100, verificationGas);
             Assert.AreEqual(348000, sizeGas);
             Assert.AreEqual(2315100, tx.NetworkFee);
@@ -182,31 +199,30 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContractDetailed()
         {
             var wallet = TestUtils.GenerateTestWallet("123");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
 
             // self-transfer of 1e-8 GAS
-            var tx = wallet.MakeTransaction(snapshot, new TransferOutput[]
-            {
-                    new TransferOutput()
-                    {
-                         AssetId = NativeContract.GAS.Hash,
-                         ScriptHash = acc.ScriptHash,
-                         Value = new BigDecimal(BigInteger.One,8)
-                    }
-            }, acc.ScriptHash);
+            var tx = wallet.MakeTransaction(snapshotCache, [
+                new TransferOutput
+                {
+                    AssetId = NativeContract.GAS.Hash,
+                    ScriptHash = acc.ScriptHash,
+                    Value = new BigDecimal(BigInteger.One, 8)
+                }
+            ], acc.ScriptHash);
 
             Assert.IsNotNull(tx);
             Assert.IsNull(tx.Witnesses);
@@ -218,7 +234,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Sign
             // ----
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             // 'from' is always required as witness
             // if not included on cosigner with a scope, its scope should be considered 'CalledByEntry'
             data.ScriptHashes.Count.Should().Be(1);
@@ -232,20 +248,20 @@ namespace Neo.UnitTests.Network.P2P.Payloads
 
             // Fast check
 
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
 
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using var engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
 
             // ------------------
@@ -270,8 +286,8 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // I + II + III + IV
             Assert.AreEqual(25 + 22 + 1 + 88 + 109, tx.Size);
 
-            Assert.AreEqual(1000, NativeContract.Policy.GetFeePerByte(snapshot));
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            Assert.AreEqual(1000, NativeContract.Policy.GetFeePerByte(snapshotCache));
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
 
             // final check: verification_cost and tx_size
             Assert.AreEqual(245000, sizeGas);
@@ -285,18 +301,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_TestScope_Global()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
             // Manually creating script
@@ -305,14 +321,14 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             using (ScriptBuilder sb = new())
             {
                 // self-transfer of 1e-8 GAS
-                BigInteger value = new BigDecimal(BigInteger.One, 8).Value;
+                var value = new BigDecimal(BigInteger.One, 8).Value;
                 sb.EmitDynamicCall(NativeContract.GAS.Hash, "transfer", acc.ScriptHash, acc.ScriptHash, value, null);
                 sb.Emit(OpCode.ASSERT);
                 script = sb.ToArray();
             }
 
             // trying global scope
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     Scopes = WitnessScope.Global
@@ -320,7 +336,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
 
             // using this...
 
-            var tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers);
+            var tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers);
 
             Assert.IsNotNull(tx);
             Assert.IsNull(tx.Witnesses);
@@ -329,7 +345,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Sign
             // ----
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             bool signed = wallet.Sign(data);
             Assert.IsTrue(signed);
 
@@ -338,22 +354,22 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             tx.Witnesses.Length.Should().Be(1);
 
             // Fast check
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
             // get sizeGas
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
             // final check on sum: verification_cost + tx_size
             Assert.AreEqual(1228520, verificationGas + sizeGas);
             // final assert
@@ -364,18 +380,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_TestScope_CurrentHash_GAS()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
             // Manually creating script
@@ -391,16 +407,16 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             }
 
             // trying global scope
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     Scopes = WitnessScope.CustomContracts,
-                    AllowedContracts = new[] { NativeContract.GAS.Hash }
+                    AllowedContracts = [NativeContract.GAS.Hash]
                 } };
 
             // using this...
 
-            var tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers);
+            var tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers);
 
             Assert.IsNotNull(tx);
             Assert.IsNull(tx.Witnesses);
@@ -409,7 +425,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Sign
             // ----
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             bool signed = wallet.Sign(data);
             Assert.IsTrue(signed);
 
@@ -418,22 +434,22 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             tx.Witnesses.Length.Should().Be(1);
 
             // Fast check
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
             // get sizeGas
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
             // final check on sum: verification_cost + tx_size
             Assert.AreEqual(1249520, verificationGas + sizeGas);
             // final assert
@@ -444,18 +460,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_TestScope_CalledByEntry_Plus_GAS()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
             // Manually creating script
@@ -464,26 +480,26 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             using (ScriptBuilder sb = new())
             {
                 // self-transfer of 1e-8 GAS
-                BigInteger value = new BigDecimal(BigInteger.One, 8).Value;
+                var value = new BigDecimal(BigInteger.One, 8).Value;
                 sb.EmitDynamicCall(NativeContract.GAS.Hash, "transfer", acc.ScriptHash, acc.ScriptHash, value, null);
                 sb.Emit(OpCode.ASSERT);
                 script = sb.ToArray();
             }
 
             // trying CalledByEntry together with GAS
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     // This combination is supposed to actually be an OR,
                     // where it's valid in both Entry and also for Custom hash provided (in any execution level)
                     // it would be better to test this in the future including situations where a deeper call level uses this custom witness successfully
                     Scopes = WitnessScope.CustomContracts | WitnessScope.CalledByEntry,
-                    AllowedContracts = new[] { NativeContract.GAS.Hash }
+                    AllowedContracts = [NativeContract.GAS.Hash]
                 } };
 
             // using this...
 
-            var tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers);
+            var tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers);
 
             Assert.IsNotNull(tx);
             Assert.IsNull(tx.Witnesses);
@@ -492,7 +508,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Sign
             // ----
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             bool signed = wallet.Sign(data);
             Assert.IsTrue(signed);
 
@@ -501,22 +517,22 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             tx.Witnesses.Length.Should().Be(1);
 
             // Fast check
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
             // get sizeGas
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
             // final check on sum: verification_cost + tx_size
             Assert.AreEqual(1249520, verificationGas + sizeGas);
             // final assert
@@ -527,14 +543,14 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_TestScope_CurrentHash_NEO_FAULT()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
@@ -552,11 +568,11 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             }
 
             // trying global scope
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     Scopes = WitnessScope.CustomContracts,
-                    AllowedContracts = new[] { NativeContract.NEO.Hash }
+                    AllowedContracts = [NativeContract.NEO.Hash]
                 } };
 
             // using this...
@@ -564,7 +580,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // expects FAULT on execution of 'transfer' Application script
             // due to lack of a valid witness validation
             Transaction tx = null;
-            Assert.ThrowsException<InvalidOperationException>(() => tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers));
+            Assert.ThrowsException<InvalidOperationException>(() => tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers));
             Assert.IsNull(tx);
         }
 
@@ -572,18 +588,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_TestScope_CurrentHash_NEO_GAS()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
             // Manually creating script
@@ -599,16 +615,16 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             }
 
             // trying two custom hashes, for same target account
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     Scopes = WitnessScope.CustomContracts,
-                    AllowedContracts = new[] { NativeContract.NEO.Hash, NativeContract.GAS.Hash }
+                    AllowedContracts = [NativeContract.NEO.Hash, NativeContract.GAS.Hash]
                 } };
 
             // using this...
 
-            var tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers);
+            var tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers);
 
             Assert.IsNotNull(tx);
             Assert.IsNull(tx.Witnesses);
@@ -617,7 +633,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Sign
             // ----
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             bool signed = wallet.Sign(data);
             Assert.IsTrue(signed);
 
@@ -631,22 +647,22 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             tx.Signers.Length.Should().Be(1);
 
             // Fast check
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
             // get sizeGas
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
             // final check on sum: verification_cost + tx_size
             Assert.AreEqual(1269520, verificationGas + sizeGas);
             // final assert
@@ -657,14 +673,14 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_TestScope_NoScopeFAULT()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
@@ -683,11 +699,11 @@ namespace Neo.UnitTests.Network.P2P.Payloads
 
             // trying with no scope
             var attributes = Array.Empty<TransactionAttribute>();
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     Scopes = WitnessScope.CustomContracts,
-                    AllowedContracts = new[] { NativeContract.NEO.Hash, NativeContract.GAS.Hash }
+                    AllowedContracts = [NativeContract.NEO.Hash, NativeContract.GAS.Hash]
                 } };
 
             // using this...
@@ -695,7 +711,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // expects FAULT on execution of 'transfer' Application script
             // due to lack of a valid witness validation
             Transaction tx = null;
-            Assert.ThrowsException<InvalidOperationException>(() => tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers, attributes));
+            Assert.ThrowsException<InvalidOperationException>(() => tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers, attributes));
             Assert.IsNull(tx);
         }
 
@@ -703,18 +719,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         public void FeeIsSignatureContract_UnexistingVerificationContractFAULT()
         {
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
             // Manually creating script
@@ -745,19 +761,19 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // expects ArgumentException on execution of 'CalculateNetworkFee' due to
             // null witness_script (no account in the wallet, no corresponding witness
             // and no verification contract for the signer)
-            Assert.ThrowsException<ArgumentException>(() => walletWithoutAcc.MakeTransaction(snapshot, script, acc.ScriptHash, signers));
+            Assert.ThrowsException<ArgumentException>(() => walletWithoutAcc.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers));
             Assert.IsNull(tx);
         }
 
         [TestMethod]
         public void Transaction_Reverify_Hashes_Length_Unequal_To_Witnesses_Length()
         {
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             Transaction txSimple = new()
             {
                 Version = 0x00,
                 Nonce = 0x01020304,
-                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS 
+                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS
                 NetworkFee = 0x0000000000000001,
                 ValidUntilBlock = 0x01020304,
                 Attributes = Array.Empty<TransactionAttribute>(),
@@ -771,9 +787,9 @@ namespace Neo.UnitTests.Network.P2P.Payloads
                 Script = new byte[] { (byte)OpCode.PUSH1 },
                 Witnesses = Array.Empty<Witness>()
             };
-            UInt160[] hashes = txSimple.GetScriptHashesForVerifying(snapshot);
+            UInt160[] hashes = txSimple.GetScriptHashesForVerifying(snapshotCache);
             Assert.AreEqual(1, hashes.Length);
-            Assert.AreNotEqual(VerifyResult.Succeed, txSimple.VerifyStateDependent(ProtocolSettings.Default, snapshot, new TransactionVerificationContext()));
+            Assert.AreNotEqual(VerifyResult.Succeed, txSimple.VerifyStateDependent(TestProtocolSettings.Default, snapshotCache, new TransactionVerificationContext(), new List<Transaction>()));
         }
 
         [TestMethod]
@@ -784,13 +800,14 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             {
                 Version = 0x00,
                 Nonce = 0x01020304,
-                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS 
+                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS
                 NetworkFee = 0x0000000000000001,
                 ValidUntilBlock = 0x01020304,
-                Signers = new Signer[] { new Signer() { Account = UInt160.Zero } },
-                Attributes = Array.Empty<TransactionAttribute>(),
-                Script = new byte[] { (byte)OpCode.PUSH1 },
-                Witnesses = new Witness[] { new Witness() { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() } }
+                Signers = [new Signer() { Account = UInt160.Zero }],
+                Attributes = [],
+                Script = new[] { (byte)OpCode.PUSH1 },
+                Witnesses = [new Witness { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() }
+                ]
             };
 
             byte[] sTx = txSimple.ToArray();
@@ -800,15 +817,15 @@ namespace Neo.UnitTests.Network.P2P.Payloads
                 "00" + // version
                 "04030201" + // nonce
                 "00e1f50500000000" + // system fee (1 GAS)
-                "0100000000000000" + // network fee (1 satoshi)
-                "04030201" + // timelimit 
+                "0100000000000000" + // network fee (1 datoshi)
+                "04030201" + // timelimit
                 "01000000000000000000000000000000000000000000" + // empty signer
                 "00" + // no attributes
                 "0111" + // push1 script
                 "010000"); // empty witnesses
 
             // try to deserialize
-            Transaction tx2 = Neo.IO.Helper.AsSerializable<Transaction>(sTx);
+            var tx2 = sTx.AsSerializable<Transaction>();
 
             tx2.Version.Should().Be(0x00);
             tx2.Nonce.Should().Be(0x01020304);
@@ -817,17 +834,16 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             tx2.NetworkFee.Should().Be(0x0000000000000001);
             tx2.ValidUntilBlock.Should().Be(0x01020304);
             tx2.Attributes.Should().BeEquivalentTo(Array.Empty<TransactionAttribute>());
-            tx2.Signers.Should().BeEquivalentTo(new[]
-            {
+            tx2.Signers.Should().BeEquivalentTo([
                 new Signer
                 {
                     Account = UInt160.Zero,
-                    AllowedContracts = Array.Empty<UInt160>(),
-                    AllowedGroups = Array.Empty<ECPoint>(),
-                    Rules = Array.Empty<WitnessRule>()
+                    AllowedContracts = [],
+                    AllowedGroups = [],
+                    Rules = []
                 }
-            });
-            tx2.Script.Span.SequenceEqual(new byte[] { (byte)OpCode.PUSH1 }).Should().BeTrue();
+            ]);
+            tx2.Script.Span.SequenceEqual([(byte)OpCode.PUSH1]).Should().BeTrue();
             tx2.Witnesses[0].InvocationScript.Span.IsEmpty.Should().BeTrue();
             tx2.Witnesses[0].VerificationScript.Span.IsEmpty.Should().BeTrue();
         }
@@ -841,28 +857,29 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             {
                 Version = 0x00,
                 Nonce = 0x01020304,
-                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS 
+                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS
                 NetworkFee = 0x0000000000000001,
                 ValidUntilBlock = 0x01020304,
-                Attributes = Array.Empty<TransactionAttribute>(),
-                Signers = new Signer[]
-                {
-                    new Signer()
+                Attributes = [],
+                Signers =
+                [
+                    new Signer
                     {
                         Account = UInt160.Parse("0x0001020304050607080900010203040506070809"),
                         Scopes = WitnessScope.Global
                     },
-                    new Signer()
+                    new Signer
                     {
                         Account = UInt160.Parse("0x0001020304050607080900010203040506070809"), // same account as above
                         Scopes = WitnessScope.CalledByEntry // different scope, but still, same account (cannot do that)
                     }
-                },
-                Script = new byte[] { (byte)OpCode.PUSH1 },
-                Witnesses = new Witness[] { new Witness() { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() } }
+                ],
+                Script = new[] { (byte)OpCode.PUSH1 },
+                Witnesses = [new Witness { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() }
+                ]
             };
 
-            byte[] sTx = txDoubleCosigners.ToArray();
+            var sTx = txDoubleCosigners.ToArray();
 
             // no need for detailed hexstring here (see basic tests for it)
             sTx.ToHexString().Should().Be("000403020100e1f5050000000001000000000000000403020102090807060504030201000908070605040302010080090807060504030201000908070605040302010001000111010000");
@@ -903,19 +920,20 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             {
                 Version = 0x00,
                 Nonce = 0x01020304,
-                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS 
+                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS
                 NetworkFee = 0x0000000000000001,
                 ValidUntilBlock = 0x01020304,
-                Attributes = Array.Empty<TransactionAttribute>(),
+                Attributes = [],
                 Signers = cosigners1, // max + 1 (should fail)
-                Script = new byte[] { (byte)OpCode.PUSH1 },
-                Witnesses = new Witness[] { new Witness() { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() } }
+                Script = new[] { (byte)OpCode.PUSH1 },
+                Witnesses = [new Witness { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() }
+                ]
             };
 
             byte[] sTx1 = txCosigners1.ToArray();
 
             // back to transaction (should fail, due to non-distinct cosigners)
-            Assert.ThrowsException<FormatException>(() => Neo.IO.Helper.AsSerializable<Transaction>(sTx1));
+            Assert.ThrowsException<FormatException>(() => sTx1.AsSerializable<Transaction>());
 
             // ----------------------------
             // this should fail (max + 1)
@@ -923,7 +941,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             var cosigners = new Signer[maxCosigners + 1];
             for (var i = 0; i < maxCosigners + 1; i++)
             {
-                string hex = i.ToString("X4");
+                var hex = i.ToString("X4");
                 while (hex.Length < 40)
                     hex = hex.Insert(0, "0");
                 cosigners[i] = new Signer
@@ -936,13 +954,14 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             {
                 Version = 0x00,
                 Nonce = 0x01020304,
-                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS 
+                SystemFee = (long)BigInteger.Pow(10, 8), // 1 GAS
                 NetworkFee = 0x0000000000000001,
                 ValidUntilBlock = 0x01020304,
-                Attributes = Array.Empty<TransactionAttribute>(),
+                Attributes = [],
                 Signers = cosigners, // max + 1 (should fail)
-                Script = new byte[] { (byte)OpCode.PUSH1 },
-                Witnesses = new Witness[] { new Witness() { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() } }
+                Script = new[] { (byte)OpCode.PUSH1 },
+                Witnesses = [new Witness { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() }
+                ]
             };
 
             byte[] sTx2 = txCosigners.ToArray();
@@ -950,7 +969,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // back to transaction (should fail, due to non-distinct cosigners)
             Transaction tx2 = null;
             Assert.ThrowsException<FormatException>(() =>
-                tx2 = Neo.IO.Helper.AsSerializable<Transaction>(sTx2)
+                tx2 = sTx2.AsSerializable<Transaction>()
             );
             Assert.IsNull(tx2);
         }
@@ -964,18 +983,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             cosigner.Scopes.Should().Be(WitnessScope.None);
 
             var wallet = TestUtils.GenerateTestWallet("");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
             var acc = wallet.CreateAccount();
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
 
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
             // Manually creating script
@@ -991,18 +1010,18 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             }
 
             // try to use fee only inside the smart contract
-            var signers = new Signer[]{ new Signer
+            var signers = new[]{ new Signer
                 {
                     Account = acc.ScriptHash,
                     Scopes =  WitnessScope.None
                 } };
 
-            Assert.ThrowsException<InvalidOperationException>(() => wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers));
+            Assert.ThrowsException<InvalidOperationException>(() => wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers));
 
             // change to global scope
             signers[0].Scopes = WitnessScope.Global;
 
-            var tx = wallet.MakeTransaction(snapshot, script, acc.ScriptHash, signers);
+            var tx = wallet.MakeTransaction(snapshotCache, script, acc.ScriptHash, signers);
 
             Assert.IsNotNull(tx);
             Assert.IsNull(tx.Witnesses);
@@ -1011,7 +1030,7 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Sign
             // ----
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             bool signed = wallet.Sign(data);
             Assert.IsTrue(signed);
 
@@ -1020,22 +1039,22 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             tx.Witnesses.Length.Should().Be(1);
 
             // Fast check
-            Assert.IsTrue(tx.VerifyWitnesses(ProtocolSettings.Default, snapshot, tx.NetworkFee));
+            Assert.IsTrue(tx.VerifyWitnesses(TestProtocolSettings.Default, snapshotCache, tx.NetworkFee));
 
             // Check
             long verificationGas = 0;
             foreach (var witness in tx.Witnesses)
             {
-                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshot, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
+                using ApplicationEngine engine = ApplicationEngine.Create(TriggerType.Verification, tx, snapshotCache, settings: TestBlockchain.TheNeoSystem.Settings, gas: tx.NetworkFee);
                 engine.LoadScript(witness.VerificationScript);
                 engine.LoadScript(witness.InvocationScript);
                 Assert.AreEqual(VMState.HALT, engine.Execute());
                 Assert.AreEqual(1, engine.ResultStack.Count);
                 Assert.IsTrue(engine.ResultStack.Pop().GetBoolean());
-                verificationGas += engine.GasConsumed;
+                verificationGas += engine.FeeConsumed;
             }
             // get sizeGas
-            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshot);
+            var sizeGas = tx.Size * NativeContract.Policy.GetFeePerByte(snapshotCache);
             // final check on sum: verification_cost + tx_size
             Assert.AreEqual(1228520, verificationGas + sizeGas);
             // final assert
@@ -1047,16 +1066,16 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         {
             uut.Script = TestUtils.GetByteArray(32, 0x42);
             uut.SystemFee = 4200000000;
-            uut.Signers = new Signer[] { new Signer() { Account = UInt160.Zero } };
-            uut.Attributes = Array.Empty<TransactionAttribute>();
-            uut.Witnesses = new[]
-            {
+            uut.Signers = [new Signer { Account = UInt160.Zero }];
+            uut.Attributes = [];
+            uut.Witnesses =
+            [
                 new Witness
                 {
                     InvocationScript = Array.Empty<byte>(),
                     VerificationScript = Array.Empty<byte>()
                 }
-            };
+            ];
 
             JObject jObj = uut.ToJson(ProtocolSettings.Default);
             jObj.Should().NotBeNull();
@@ -1072,23 +1091,23 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         [TestMethod]
         public void Test_GetAttribute()
         {
-            var tx = new Transaction()
+            var tx = new Transaction
             {
-                Attributes = Array.Empty<TransactionAttribute>(),
+                Attributes = [],
                 NetworkFee = 0,
                 Nonce = (uint)Environment.TickCount,
                 Script = new byte[Transaction.MaxTransactionSize],
-                Signers = new Signer[] { new Signer() { Account = UInt160.Zero } },
+                Signers = [new Signer { Account = UInt160.Zero }],
                 SystemFee = 0,
                 ValidUntilBlock = 0,
                 Version = 0,
-                Witnesses = Array.Empty<Witness>(),
+                Witnesses = [],
             };
 
             Assert.IsNull(tx.GetAttribute<OracleResponse>());
             Assert.IsNull(tx.GetAttribute<HighPriorityAttribute>());
 
-            tx.Attributes = new TransactionAttribute[] { new HighPriorityAttribute() };
+            tx.Attributes = [new HighPriorityAttribute()];
 
             Assert.IsNull(tx.GetAttribute<OracleResponse>());
             Assert.IsNotNull(tx.GetAttribute<HighPriorityAttribute>());
@@ -1097,42 +1116,41 @@ namespace Neo.UnitTests.Network.P2P.Payloads
         [TestMethod]
         public void Test_VerifyStateIndependent()
         {
-            var tx = new Transaction()
+            var tx = new Transaction
             {
-                Attributes = Array.Empty<TransactionAttribute>(),
+                Attributes = [],
                 NetworkFee = 0,
                 Nonce = (uint)Environment.TickCount,
                 Script = new byte[Transaction.MaxTransactionSize],
-                Signers = new Signer[] { new Signer() { Account = UInt160.Zero } },
+                Signers = [new Signer { Account = UInt160.Zero }],
                 SystemFee = 0,
                 ValidUntilBlock = 0,
                 Version = 0,
-                Witnesses = new[]
-                {
+                Witnesses =
+                [
                     new Witness
                     {
                         InvocationScript = Array.Empty<byte>(),
                         VerificationScript = Array.Empty<byte>()
                     }
-                }
+                ]
             };
-            tx.VerifyStateIndependent(ProtocolSettings.Default).Should().Be(VerifyResult.OverSize);
+            tx.VerifyStateIndependent(TestProtocolSettings.Default).Should().Be(VerifyResult.OverSize);
             tx.Script = Array.Empty<byte>();
-            tx.VerifyStateIndependent(ProtocolSettings.Default).Should().Be(VerifyResult.Succeed);
+            tx.VerifyStateIndependent(TestProtocolSettings.Default).Should().Be(VerifyResult.Succeed);
 
             var walletA = TestUtils.GenerateTestWallet("123");
             var walletB = TestUtils.GenerateTestWallet("123");
-            var snapshot = TestBlockchain.GetTestSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
 
             var a = walletA.CreateAccount();
             var b = walletB.CreateAccount();
 
             var multiSignContract = Contract.CreateMultiSigContract(2,
-                new ECPoint[]
-                {
-                        a.GetKey().PublicKey,
-                        b.GetKey().PublicKey
-                });
+            [
+                a.GetKey().PublicKey,
+                b.GetKey().PublicKey
+            ]);
 
             walletA.CreateAccount(multiSignContract, a.GetKey());
             var acc = walletB.CreateAccount(multiSignContract, b.GetKey());
@@ -1140,33 +1158,32 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
-            var entry = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var entry = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
 
             entry.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
-            snapshot.Commit();
+            snapshotCache.Commit();
 
             // Make transaction
 
-            tx = walletA.MakeTransaction(snapshot, new TransferOutput[]
-            {
-                    new TransferOutput()
-                    {
-                         AssetId = NativeContract.GAS.Hash,
-                         ScriptHash = acc.ScriptHash,
-                         Value = new BigDecimal(BigInteger.One,8)
-                    }
-            }, acc.ScriptHash);
+            tx = walletA.MakeTransaction(snapshotCache, [
+                new TransferOutput
+                {
+                    AssetId = NativeContract.GAS.Hash,
+                    ScriptHash = acc.ScriptHash,
+                    Value = new BigDecimal(BigInteger.One, 8)
+                }
+            ], acc.ScriptHash);
 
             // Sign
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             Assert.IsTrue(walletA.Sign(data));
             Assert.IsTrue(walletB.Sign(data));
             Assert.IsTrue(data.Completed);
 
             tx.Witnesses = data.GetWitnesses();
-            tx.VerifyStateIndependent(ProtocolSettings.Default).Should().Be(VerifyResult.Succeed);
+            tx.VerifyStateIndependent(TestProtocolSettings.Default).Should().Be(VerifyResult.Succeed);
 
             // Different hash
 
@@ -1175,40 +1192,42 @@ namespace Neo.UnitTests.Network.P2P.Payloads
                 VerificationScript = walletB.GetAccounts().First().Contract.Script,
                 InvocationScript = tx.Witnesses[0].InvocationScript.ToArray()
             };
-            tx.VerifyStateIndependent(ProtocolSettings.Default).Should().Be(VerifyResult.Invalid);
+            tx.VerifyStateIndependent(TestProtocolSettings.Default).Should().Be(VerifyResult.Invalid);
         }
 
         [TestMethod]
         public void Test_VerifyStateDependent()
         {
-            var snapshot = TestBlockchain.GetTestSnapshot();
-            var height = NativeContract.Ledger.CurrentIndex(snapshot);
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
+            var height = NativeContract.Ledger.CurrentIndex(snapshotCache);
             var tx = new Transaction()
             {
-                Attributes = Array.Empty<TransactionAttribute>(),
+                Attributes = [],
                 NetworkFee = 55000,
                 Nonce = (uint)Environment.TickCount,
                 Script = Array.Empty<byte>(),
-                Signers = new Signer[] { new Signer() { Account = UInt160.Zero } },
+                Signers = [new Signer() { Account = UInt160.Zero }],
                 SystemFee = 0,
                 ValidUntilBlock = height + 1,
                 Version = 0,
-                Witnesses = new Witness[] {
-                    new Witness() { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() },
-                    new Witness() { InvocationScript = Array.Empty<byte>(), VerificationScript = new byte[1] }
-                }
+                Witnesses =
+                [
+                    new Witness { InvocationScript = Array.Empty<byte>(), VerificationScript = Array.Empty<byte>() },
+                    new Witness { InvocationScript = Array.Empty<byte>(), VerificationScript = new byte[1] }
+                ]
             };
 
             // Fake balance
 
             var key = NativeContract.GAS.CreateStorageKey(20, tx.Sender);
-            var balance = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            var balance = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
             balance.GetInteroperable<AccountState>().Balance = tx.NetworkFee;
+            var conflicts = new List<Transaction>();
 
-            tx.VerifyStateDependent(ProtocolSettings.Default, snapshot, new TransactionVerificationContext()).Should().Be(VerifyResult.Invalid);
+            tx.VerifyStateDependent(ProtocolSettings.Default, snapshotCache, new TransactionVerificationContext(), conflicts).Should().Be(VerifyResult.Invalid);
             balance.GetInteroperable<AccountState>().Balance = 0;
             tx.SystemFee = 10;
-            tx.VerifyStateDependent(ProtocolSettings.Default, snapshot, new TransactionVerificationContext()).Should().Be(VerifyResult.InsufficientFunds);
+            tx.VerifyStateDependent(ProtocolSettings.Default, snapshotCache, new TransactionVerificationContext(), conflicts).Should().Be(VerifyResult.InsufficientFunds);
 
             var walletA = TestUtils.GenerateTestWallet("123");
             var walletB = TestUtils.GenerateTestWallet("123");
@@ -1217,26 +1236,25 @@ namespace Neo.UnitTests.Network.P2P.Payloads
             var b = walletB.CreateAccount();
 
             var multiSignContract = Contract.CreateMultiSigContract(2,
-                new ECPoint[]
-                {
-                        a.GetKey().PublicKey,
-                        b.GetKey().PublicKey
-                });
+            [
+                a.GetKey().PublicKey,
+                b.GetKey().PublicKey
+            ]);
 
             walletA.CreateAccount(multiSignContract, a.GetKey());
             var acc = walletB.CreateAccount(multiSignContract, b.GetKey());
 
             // Fake balance
 
-            snapshot = TestBlockchain.GetTestSnapshot();
+            snapshotCache = TestBlockchain.GetTestSnapshotCache();
             key = NativeContract.GAS.CreateStorageKey(20, acc.ScriptHash);
-            balance = snapshot.GetAndChange(key, () => new StorageItem(new AccountState()));
+            balance = snapshotCache.GetAndChange(key, () => new StorageItem(new AccountState()));
             balance.GetInteroperable<AccountState>().Balance = 10000 * NativeContract.GAS.Factor;
 
             // Make transaction
 
-            snapshot.Commit();
-            tx = walletA.MakeTransaction(snapshot, new TransferOutput[]
+            snapshotCache.Commit();
+            tx = walletA.MakeTransaction(snapshotCache, new[]
             {
                     new TransferOutput()
                     {
@@ -1248,13 +1266,13 @@ namespace Neo.UnitTests.Network.P2P.Payloads
 
             // Sign
 
-            var data = new ContractParametersContext(snapshot, tx, ProtocolSettings.Default.Network);
+            var data = new ContractParametersContext(snapshotCache, tx, TestProtocolSettings.Default.Network);
             Assert.IsTrue(walletA.Sign(data));
             Assert.IsTrue(walletB.Sign(data));
             Assert.IsTrue(data.Completed);
 
             tx.Witnesses = data.GetWitnesses();
-            tx.VerifyStateDependent(ProtocolSettings.Default, snapshot, new TransactionVerificationContext()).Should().Be(VerifyResult.Succeed);
+            tx.VerifyStateDependent(TestProtocolSettings.Default, snapshotCache, new TransactionVerificationContext(), new List<Transaction>()).Should().Be(VerifyResult.Succeed);
         }
 
         [TestMethod]

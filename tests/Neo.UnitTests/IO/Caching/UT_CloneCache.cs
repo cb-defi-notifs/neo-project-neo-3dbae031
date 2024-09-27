@@ -1,5 +1,17 @@
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_CloneCache.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
+
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Neo.Extensions;
 using Neo.IO;
 using Neo.Persistence;
 using Neo.SmartContract;
@@ -144,8 +156,8 @@ namespace Neo.UnitTests.IO.Caching
         [TestMethod]
         public void TestCacheOverrideIssue2572()
         {
-            var snapshot = TestBlockchain.GetTestSnapshot();
-            var storages = snapshot.CreateSnapshot();
+            var snapshotCache = TestBlockchain.GetTestSnapshotCache();
+            var storages = snapshotCache.CreateSnapshot();
 
             storages.Add
                 (
@@ -163,10 +175,10 @@ namespace Neo.UnitTests.IO.Caching
             var item = storages.GetAndChange(new StorageKey() { Key = new byte[] { 0x01, 0x01 }, Id = 0 });
             item.Value = new byte[] { 0x06 };
 
-            var res = snapshot.TryGet(new StorageKey() { Key = new byte[] { 0x01, 0x01 }, Id = 0 });
+            var res = snapshotCache.TryGet(new StorageKey() { Key = new byte[] { 0x01, 0x01 }, Id = 0 });
             Assert.AreEqual("05", res.Value.Span.ToHexString());
             storages.Commit();
-            res = snapshot.TryGet(new StorageKey() { Key = new byte[] { 0x01, 0x01 }, Id = 0 });
+            res = snapshotCache.TryGet(new StorageKey() { Key = new byte[] { 0x01, 0x01 }, Id = 0 });
             Assert.AreEqual("06", res.Value.Span.ToHexString());
         }
     }

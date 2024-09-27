@@ -1,3 +1,14 @@
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// UT_BloomFilter.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
+// for more details.
+//
+// Redistribution and use in source and binary forms with or without
+// modifications are permitted.
+
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Neo.Cryptography;
@@ -27,6 +38,8 @@ namespace Neo.UnitTests.Cryptography
             int m = -7, n = 10;
             uint nTweak = 123456;
             Action action = () => new BloomFilter(m, n, nTweak);
+            action.Should().Throw<ArgumentOutOfRangeException>();
+            action = () => new BloomFilter(m, n, nTweak, new byte[] { 0, 1, 2, 3, 4 });
             action.Should().Throw<ArgumentOutOfRangeException>();
 
             m = 7;

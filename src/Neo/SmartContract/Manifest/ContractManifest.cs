@@ -1,10 +1,11 @@
-// Copyright (C) 2015-2022 The Neo Project.
-// 
-// The neo is free software distributed under the MIT software license, 
-// see the accompanying file LICENSE in the main directory of the
-// project or http://www.opensource.org/licenses/mit-license.php 
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// ContractManifest.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
 // for more details.
-// 
+//
 // Redistribution and use in source and binary forms with or without
 // modifications are permitted.
 
@@ -79,8 +80,9 @@ namespace Neo.SmartContract.Manifest
             Permissions = ((Array)@struct[5]).Select(p => p.ToInteroperable<ContractPermission>()).ToArray();
             Trusts = @struct[6] switch
             {
-                Null => WildcardContainer<ContractPermissionDescriptor>.CreateWildcard(),
-                Array array => WildcardContainer<ContractPermissionDescriptor>.Create(array.Select(p => new ContractPermissionDescriptor(p.GetSpan())).ToArray()),
+                Null _ => WildcardContainer<ContractPermissionDescriptor>.CreateWildcard(),
+                // Array array when array.Any(p => ((ByteString)p).Size == 0) => WildcardContainer<ContractPermissionDescriptor>.CreateWildcard(),
+                Array array => WildcardContainer<ContractPermissionDescriptor>.Create(array.Select(ContractPermissionDescriptor.Create).ToArray()),
                 _ => throw new ArgumentException(null, nameof(stackItem))
             };
             Extra = (JObject)JToken.Parse(@struct[7].GetSpan());
@@ -96,7 +98,7 @@ namespace Neo.SmartContract.Manifest
                 new Array(referenceCounter, SupportedStandards.Select(p => (StackItem)p)),
                 Abi.ToStackItem(referenceCounter),
                 new Array(referenceCounter, Permissions.Select(p => p.ToStackItem(referenceCounter))),
-                Trusts.IsWildcard ? StackItem.Null : new Array(referenceCounter, Trusts.Select(p => (StackItem)p.ToArray())),
+                Trusts.IsWildcard ? StackItem.Null : new Array(referenceCounter, Trusts.Select(p => p.ToArray()?? StackItem.Null)),
                 Extra is null ? "null" : Extra.ToByteArray(false)
             };
         }
@@ -110,20 +112,21 @@ namespace Neo.SmartContract.Manifest
         {
             ContractManifest manifest = new()
             {
-                Name = json["name"].GetString(),
-                Groups = ((JArray)json["groups"]).Select(u => ContractGroup.FromJson((JObject)u)).ToArray(),
-                SupportedStandards = ((JArray)json["supportedstandards"]).Select(u => u.GetString()).ToArray(),
+                Name = json["name"]!.GetString(),
+                Groups = ((JArray)json["groups"])?.Select(u => ContractGroup.FromJson((JObject)u)).ToArray() ?? [],
+                SupportedStandards = ((JArray)json["supportedstandards"])?.Select(u => u.GetString()).ToArray() ?? [],
                 Abi = ContractAbi.FromJson((JObject)json["abi"]),
-                Permissions = ((JArray)json["permissions"]).Select(u => ContractPermission.FromJson((JObject)u)).ToArray(),
+                Permissions = ((JArray)json["permissions"])?.Select(u => ContractPermission.FromJson((JObject)u)).ToArray() ?? [],
                 Trusts = WildcardContainer<ContractPermissionDescriptor>.FromJson(json["trusts"], u => ContractPermissionDescriptor.FromJson((JString)u)),
                 Extra = (JObject)json["extra"]
             };
+
             if (string.IsNullOrEmpty(manifest.Name))
                 throw new FormatException();
             _ = manifest.Groups.ToDictionary(p => p.PubKey);
             if (json["features"] is not JObject features || features.Count != 0)
                 throw new FormatException();
-            if (manifest.SupportedStandards.Any(p => string.IsNullOrEmpty(p)))
+            if (manifest.SupportedStandards.Any(string.IsNullOrEmpty))
                 throw new FormatException();
             _ = manifest.SupportedStandards.ToDictionary(p => p);
             _ = manifest.Permissions.ToDictionary(p => p.Contract);
@@ -171,10 +174,21 @@ namespace Neo.SmartContract.Manifest
         /// <summary>
         /// Determines whether the manifest is valid.
         /// </summary>
+        /// <param name="limits">The <see cref="ExecutionEngineLimits"/> used for test serialization.</param>
         /// <param name="hash">The hash of the contract.</param>
         /// <returns><see langword="true"/> if the manifest is valid; otherwise, <see langword="false"/>.</returns>
-        public bool IsValid(UInt160 hash)
+        public bool IsValid(ExecutionEngineLimits limits, UInt160 hash)
         {
+            // Ensure that is serializable
+            try
+            {
+                _ = BinarySerializer.Serialize(ToStackItem(null), limits);
+            }
+            catch
+            {
+                return false;
+            }
+            // Check groups
             return Groups.All(u => u.IsValid(hash));
         }
     }

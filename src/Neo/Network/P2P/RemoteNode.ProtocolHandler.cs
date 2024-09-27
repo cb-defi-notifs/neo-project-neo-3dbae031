@@ -1,10 +1,11 @@
-// Copyright (C) 2015-2022 The Neo Project.
-// 
-// The neo is free software distributed under the MIT software license, 
-// see the accompanying file LICENSE in the main directory of the
-// project or http://www.opensource.org/licenses/mit-license.php 
+// Copyright (C) 2015-2024 The Neo Project.
+//
+// RemoteNode.ProtocolHandler.cs file belongs to the neo project and is free
+// software distributed under the MIT software license, see the
+// accompanying file LICENSE in the main directory of the
+// repository or http://www.opensource.org/licenses/mit-license.php
 // for more details.
-// 
+//
 // Redistribution and use in source and binary forms with or without
 // modifications are permitted.
 
@@ -29,9 +30,9 @@ namespace Neo.Network.P2P
     partial class RemoteNode
     {
         private class Timer { }
-        private class PendingKnownHashesCollection : KeyedCollectionSlim<UInt256, (UInt256, DateTime)>
+        private class PendingKnownHashesCollection : KeyedCollectionSlim<UInt256, Tuple<UInt256, DateTime>>
         {
-            protected override UInt256 GetKeyForItem((UInt256, DateTime) item)
+            protected override UInt256 GetKeyForItem(Tuple<UInt256, DateTime> item)
             {
                 return item.Item1;
             }
@@ -318,7 +319,7 @@ namespace Neo.Network.P2P
             switch (inventory)
             {
                 case Transaction transaction:
-                    if (!system.ContainsTransaction(transaction.Hash))
+                    if (!(system.ContainsTransaction(transaction.Hash) != ContainsTransactionType.NotExist || system.ContainsConflictHash(transaction.Hash, transaction.Signers.Select(s => s.Account))))
                         system.TxRouter.Tell(new TransactionRouter.Preverify(transaction, true));
                     break;
                 case Block block:
@@ -353,7 +354,7 @@ namespace Neo.Network.P2P
             }
             if (hashes.Length == 0) return;
             foreach (UInt256 hash in hashes)
-                pendingKnownHashes.Add((hash, TimeProvider.Current.UtcNow));
+                pendingKnownHashes.Add(Tuple.Create(hash, TimeProvider.Current.UtcNow));
             system.TaskManager.Tell(new TaskManager.NewTasks { Payload = InvPayload.Create(payload.Type, hashes) });
         }
 
